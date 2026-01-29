@@ -3,6 +3,7 @@ import re
 import pystray
 import pyperclip
 import platform
+import hashlib
 
 # import keyboard
 import threading
@@ -188,36 +189,48 @@ class ImageToMarkdown:
 
     def process_clipboard_image(self):
         if not self.process_pre_exist_image:
-            last_image = self.initial_image
+            # 获取当前剪贴板图片的哈希
+            try:
+                initial_img = ImageGrab.grabclipboard()
+                last_hash = self.get_image_hash(initial_img)
+            except Exception:
+                last_hash = None
         else:
-            last_image = None
+            last_hash = None
+
         while self.running:
             try:
                 if self.screenshot_hotkey_isNull or self.screenshot_hotkey_triggered:
                     image = ImageGrab.grabclipboard()
-                    if isinstance(image, Image.Image) and image != last_image:
-                        self.log_callback("检测到新的剪贴板图像。")
-                        self.app.update_icon_status("processing")
+                    if isinstance(image, Image.Image):
+                        current_hash = self.get_image_hash(image)
+                        if current_hash != last_hash:
+                            self.log_callback("检测到新的剪贴板图像。")
+                            self.app.update_icon_status("processing")
 
-                        markdown_content = self.process_image(image)
-                        pyperclip.copy(markdown_content)
-                        self.log_callback("识别后的内容已复制到剪贴板。")
+                            markdown_content = self.process_image(image)
+                            pyperclip.copy(markdown_content)
+                            self.log_callback("识别后的内容已复制到剪贴板。")
 
-                        self.app.update_icon_status("success")
-                        self.app.send_notification(
-                            "success", "识别完成，已复制到剪贴板"
-                        )
-                        last_image = image
-                        self.screenshot_hotkey_triggered = False
+                            self.app.update_icon_status("success")
+                            self.app.send_notification(
+                                "success", "识别完成，已复制到剪贴板"
+                            )
+                            last_hash = current_hash
+                            self.screenshot_hotkey_triggered = False
+                        elif self.screenshot_hotkey_triggered:
+                            # 如果是手动触发快捷键，即使图片没变也给个提示，或者强制重新处理
+                            self.log_callback("图片未变化，跳过识别。")
+                            self.screenshot_hotkey_triggered = False
             except Exception as e:
                 error_msg = str(e)
                 self.log_callback(f"发生错误: {error_msg}")
                 self.app.update_icon_status("error")
                 self.app.send_notification("error", f"识别失败: {error_msg[:50]}")
-                # 不再停止程序，只跳过这张图片，继续监听下一张
-                # 更新 last_image 避免重复处理同一张出错的图片
+                # 出错后，将当前哈希记录下来，避免在死循环中重复尝试同一张会导致报错的图片
                 try:
-                    last_image = ImageGrab.grabclipboard()
+                    err_img = ImageGrab.grabclipboard()
+                    last_hash = self.get_image_hash(err_img)
                 except Exception:
                     pass
                 self.screenshot_hotkey_triggered = False
@@ -233,6 +246,17 @@ class ImageToMarkdown:
     def set_wrappers(self, inline_wrapper: str, block_wrapper: str):
         """代理到 markdown_processor 的 set_wrappers 方法"""
         self.markdown_processor.set_wrappers(inline_wrapper, block_wrapper)
+
+    def get_image_hash(self, image):
+        """计算图片的简单哈希值，用于对比图片是否变化"""
+        if image is None:
+            return None
+        # 缩放到小尺寸并转换为灰度图以提高对比速度
+        small_img = image.resize((32, 32), Image.Resampling.LANCZOS).convert("L")
+        pixels = list(small_img.getdata())
+        avg = sum(pixels) / len(pixels)
+        bits = "".join(["1" if p > avg else "0" for p in pixels])
+        return hashlib.md5(bits.encode()).hexdigest()
 
 
 class App:
